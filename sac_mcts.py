@@ -18,7 +18,7 @@ from utils import soft_update
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 parser = argparse.ArgumentParser(description='PyTorch Soft Actor-Critic Args')
-parser.add_argument('--env-name', default="Hopper-v2",
+parser.add_argument('--env-name', default="Humanoid-v2",
 					help='Mujoco Gym environment (default: HalfCheetah-v2)')
 parser.add_argument('--policy', default="Gaussian",
 					help='Policy Type: Gaussian | Deterministic (default: Gaussian)')
@@ -64,13 +64,19 @@ parser.add_argument('--max_interact_steps', default=1000)
 parser.add_argument('--truncate_length', default=100)
 parser.add_argument('--double_Q', default=True)
 parser.add_argument('--explore_rate', default = 1.)
+parser.add_argument("--result_folder", default='results')
+parser.add_argument("--eta_init", type=float, default=3.)
+parser.add_argument("--train_freq", type=int, default=10)
+parser.add_argument("--non_optimistic_steps", type=int, default=1)
+parser.add_argument('--rofu_steps', type=int, default=3)
 args = parser.parse_args()
+filename = f"./{args.result_folder}/{args.env_name}_seed_{args.seed}"
 
+print(filename)
 
-writer=SummaryWriter(comment=args.alg_name)
+writer=SummaryWriter(comment=f"{args.env_name}_{args.alg_name}")
 
-
-
+epi=0
 env = gym.make(args.env_name)
 env.seed(args.seed)
 env.action_space.seed(args.seed)
@@ -90,6 +96,11 @@ class ActorCriticMCTS:
 		self.env=env
 		self.critic_upd_steps = 0
 		self.explore_rate = args.explore_rate
+		self.samples = 0
+
+		self.samples_log = []
+		self.evals_log = []
+
 
 	def clear(self):
 		policy = GaussianPolicy(state_dim, action_dim).to(device=device)
@@ -113,7 +124,7 @@ class ActorCriticMCTS:
 		critic_evals = []
 		optimistic_evals = []
 		for action in actions:
-			rofurew, critic_eval, optimistic_eval = self.RofuReward(tensor_state, action)
+			rofurew, critic_eval, optimistic_eval = self.RofuReward(tensor_state, action, training_steps=args.rofu_steps)
 			optimism_r.append(rofurew)
 			critic_evals.append(critic_eval)
 			optimistic_evals.append(optimistic_eval)
@@ -122,7 +133,7 @@ class ActorCriticMCTS:
 		return actions[action_id], optimistic_evals[action_id] #np.min(optimism_r)
 
 	def compute_eta(self):
-		return 1. / np.log(1. + len(self.memory))#1./ np.sqrt(1. + len(self.memory))
+		return args.eta_init / np.log(1. + len(self.memory))#1./ np.sqrt(1. + len(self.memory))
 
 	def RofuReward(self, state, action, training_steps=10):
 		critic_state_dict = copy.deepcopy(self.critic.state_dict())
@@ -168,7 +179,10 @@ class ActorCriticMCTS:
 		if rand_act:
 			action, estimated = self.env.action_space.sample(), [0.]
 		elif optimistic:
-			action, ucb = self.SelectAction(state, num_candidates=5)
+			if self.samples < args.non_optimistic_steps:
+				action, ucb = self.SelectAction(state, num_candidates=1)
+			else:
+				action, ucb = self.SelectAction(state, num_candidates=5)
 			action=action.cpu().data.numpy()[0]
 			estimated=[ucb]
 		else:
@@ -177,6 +191,19 @@ class ActorCriticMCTS:
 		path_state = [state]
 		path_action = [action]
 		path_reward = [reward]
+
+		self.samples += 1
+		if self.samples % 1000 == 0:
+			curres = []
+			_env = gym.make(args.env_name)
+			for __ in range(5):
+				state = _env.reset()
+				evaluations = self.eval(state, _env)
+				curres.append(evaluations)
+			self.evals_log.append(curres)
+			self.samples_log.append(self.samples)
+			np.savez(filename, samples=self.samples_log, evals=self.evals_log)
+			writer.add_scalar("evaluations", np.mean(curres), self.samples)
 
 		_s, _a, _r, est = self.Interaction(next_state, steps+1, max_steps, done, rand_act=rand_act, optimistic=optimistic)
 		tensor_state=torch.FloatTensor(state).reshape(1, -1).to(device)
@@ -192,15 +219,15 @@ class ActorCriticMCTS:
 			print("selecting action", steps, disc_r, cr, estimated[0])
 		return path_state + _s, path_action +_a, path_reward + _r, estimated+est
 
-	def eval(self, state, steps=0, max_steps=1000, done=False):
+	def eval(self, state, _env, steps=0, max_steps=1000, done=False):
 		if steps == max_steps or done:
 			return 0.
 		tensor_state = torch.FloatTensor(state).reshape(1, -1).to(device)
 		_action = self.policy.sample(tensor_state)[2]
 		action = _action.cpu().data.numpy()[0]
-		next_state, reward, done, _ = self.env.step(action)
-		print("eval steps", steps, reward)
-		q = self.eval(next_state, steps + 1, max_steps, done)
+		next_state, reward, done, _ = _env.step(action)
+		#print("eval steps", steps, reward)
+		q = self.eval(next_state, _env, steps + 1, max_steps, done)
 		return q + reward
 
 
@@ -258,7 +285,7 @@ class ActorCriticMCTS:
 		return ent_loss, rew_loss
 
 def parse_path(path_state, path_action, path_reward, replay_memory, max_steps=args.max_interact_steps, truncate=False, truncate_length=50):
-	length=len(path_state)
+	length = len(path_state)
 	for i in range(length - 1):
 		mask = 1.
 		if i == length - 2 and length <= max_steps:
@@ -292,11 +319,11 @@ if args.double_Q:
 else:
 	critic = QNetwork(state_dim, action_dim, args.hidden_size).to(device=device)
 
-memory = TrajReplayMemory(2000000, args.seed, state_dim, action_dim)
+memory = TrajReplayMemory(args.replay_size, args.seed, state_dim, action_dim)
 
 alg = ActorCriticMCTS(policy, critic, env, memory, args)
 __=0
-while len(memory) < 30:
+while len(memory) < args.start_steps:
 	state=env.reset()
 	ps, pa, pr, _=alg.Interaction(state, done=False, steps=0, max_steps=10, rand_act=True)
 	print(len(ps), len(pa), len(pr))
@@ -307,24 +334,29 @@ while len(memory) < 30:
 
 critic_train_steps=0
 
-samples = 300
-for epi in range(1000):
+alg.samples = len(memory)
+while alg.samples < args.num_steps:
+	epi += 1
 	#if epi % 1 == 0:
 	#	alg.clear()
-	state = env.reset()
-	evaluations = alg.eval(state)
-	writer.add_scalar("evaluations", evaluations, samples)
+	if epi % 1 == 0: 
+		pass
+
 	state = env.reset()
 	print("episode", epi)
 	ps, pa, pr,_ = alg.Interaction(state, done=False, steps=0, max_steps=args.max_interact_steps, optimistic=True)
 	#print(ps, pa, pr)
 	parse_path(ps, pa, pr, memory, truncate=True, truncate_length=args.max_interact_steps)
-	samples += len(ps)
+	#samples += len(ps)
 	writer.add_scalar("epireward", np.sum(pr), epi)
 	interaction_steps=len(ps)
-	for _ in range(10 * len(ps)):
+	train_freq=args.train_freq if alg.samples > args.non_optimistic_steps else 1
+	for _ in range(train_freq * len(ps)):
 		alg.train_critic()
-	for _ in range(10 * len(ps)):
-		alg.train_policy()
+	p_ent_loss, p_rew_loss =0, 0
+	for _ in range(train_freq * len(ps)):
+		p_ent_loss, p_rew_loss=alg.train_policy()
 	p_var = policy_var(alg.policy, alg)
-	writer.add_scalar("policy_var", p_var, samples)
+	writer.add_scalar("policy_var", p_var, alg.samples)
+	writer.add_scalar("policy_ent_loss", p_ent_loss, alg.samples)
+	writer.add_scalar("policy_rew_loss", p_rew_loss, alg.samples)
