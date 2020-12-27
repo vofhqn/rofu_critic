@@ -343,11 +343,10 @@ while alg.samples < args.num_steps:
 		pass
 
 	state = env.reset()
-	print("episode", epi)
+	print("episode", epi, "samples", alg.samples)
+	print(args)
 	ps, pa, pr,_ = alg.Interaction(state, done=False, steps=0, max_steps=args.max_interact_steps, optimistic=True)
-	#print(ps, pa, pr)
 	parse_path(ps, pa, pr, memory, truncate=True, truncate_length=args.max_interact_steps)
-	#samples += len(ps)
 	writer.add_scalar("epireward", np.sum(pr), epi)
 	interaction_steps=len(ps)
 	train_freq=args.train_freq if alg.samples > args.non_optimistic_steps else 1
