@@ -30,7 +30,7 @@ parser.add_argument('--tau', type=float, default=0.005, metavar='G',
 					help='target smoothing coefficient(τ) (default: 0.005)')
 parser.add_argument('--lr', type=float, default=0.0003, metavar='G',
 					help='learning rate (default: 0.0003)')
-parser.add_argument('--alpha', type=float, default=.5, metavar='G',
+parser.add_argument('--alpha', type=float, default=.2, metavar='G',
 					help='Temperature parameter α determines the relative importance of the entropy\
 							term against the reward (default: 0.2)')
 parser.add_argument('--automatic_entropy_tuning', type=bool, default=False, metavar='G',
@@ -325,12 +325,11 @@ alg = ActorCriticMCTS(policy, critic, env, memory, args)
 __=0
 while len(memory) < args.start_steps:
 	state=env.reset()
-	ps, pa, pr, _=alg.Interaction(state, done=False, steps=0, max_steps=10, rand_act=True)
+	ps, pa, pr, _=alg.Interaction(state, done=False, steps=0, max_steps=1000, rand_act=True)
 	print(len(ps), len(pa), len(pr))
 	parse_path(ps, pa, pr, memory)
 	writer.add_scalar("rand reward", np.sum(pr), __)
 	__+=1
-	break
 
 critic_train_steps=0
 
